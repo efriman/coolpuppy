@@ -237,6 +237,13 @@ def parse_args_coolpuppy():
         required=False,
         help="""Store horizontal and vertical stripes in pileup output""",
     )
+    parser.add_argument(
+        "--bw",
+        type=str,
+        help="""Path to a bigWig file""",
+        default=False,
+        required=False,
+    )
 
     # Rescaling
     parser.add_argument(
@@ -536,6 +543,7 @@ def main():
         rescale_flank=rescale_flank,
         rescale_size=args.rescale_size,
         store_stripes=args.store_stripes,
+        bw=args.bw,
         nproc=nproc,
         seed=args.seed,
     )

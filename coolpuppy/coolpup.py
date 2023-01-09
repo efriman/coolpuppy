@@ -19,6 +19,8 @@ from cooltools import numutils as ctutils
 from cooltools.lib import common, checks
 from cooltools.api import snipping, coverage
 
+import pyBigWig
+
 from .lib import numutils
 from .lib.puputils import _add_snip, group_by_region, norm_coverage, sum_pups
 
@@ -789,6 +791,7 @@ class PileUpper:
         flip_negative_strand=False,
         ignore_diags=2,
         store_stripes=False,
+        bw=False,
         nproc=1,
     ):
         """Creates pileups
@@ -871,6 +874,7 @@ class PileUpper:
         self.flip_negative_strand = flip_negative_strand
         self.ignore_diags = ignore_diags
         self.store_stripes = store_stripes
+        self.bw = bw
         self.nproc = nproc
 
         if view_df is None:
@@ -999,6 +1003,30 @@ class PileUpper:
                     + str(self.rescale_size)
                     + " pixels"
                 )
+        if self.bw:
+            try:
+                self.bw = pyBigWig.open(self.bw)
+            except:
+                self.bw = False
+            else:
+                if not self.bw.isBigWig():
+                    self.bw = False
+                    logging.info("Not a bigWig file, ignoring")
+                else:
+                    bw_chroms = pd.DataFrame({k: v for k, v in self.bw.chroms().items() if k in self.final_chroms},
+                                             index=[0]).T.reset_index()
+                    bw_chroms.columns = ["name", "length"]
+                    bw_chroms["length"] = bw_chroms["length"].astype(np.int32)
+                    bw_chroms = bw_chroms.sort_values(by="name",
+                                                      key=lambda x: np.argsort(natsorted(bw_chroms["name"]))
+                                                     ).reset_index(drop=True)
+                    clr_chroms = clr.chroms()[:]
+                    clr_chroms = clr_chroms[clr_chroms["name"].isin(self.final_chroms)].reset_index(drop=True)
+                    if not bw_chroms.equals(clr_chroms):
+                        logging.info("bigWig and cooler chromosomes don't match. May be from different assemblies. Ignoring bigWig")
+                        self.bw = False
+                    else:
+                        self.nbins = int(2*(self.flank / self.resolution) + 1)
 
         self.empty_outmap = self.make_outmap()
 
@@ -1012,6 +1040,9 @@ class PileUpper:
             "cov_end": np.zeros((self.empty_outmap.shape[1])),
             "coordinates": [],
         }
+        if self.bw:
+            self.empty_pup.update({"bw_1": np.zeros((self.empty_outmap.shape[0])),
+                                   "bw_2": np.zeros((self.empty_outmap.shape[1]))})
 
     def get_expected_trans(self, region1, region2):
         exp_value = self.expected_df.loc[
@@ -1201,6 +1232,11 @@ class PileUpper:
                 snip["horizontal_stripe"] = []
                 snip["vertical_stripe"] = []
                 snip["coordinates"] = []
+            
+            if self.bw:
+                bw_values = self._get_bw_values_snip(snip)
+                snip["bw_1"] = np.array(bw_values[0])
+                snip["bw_2"] = np.array(bw_values[1])
 
             yield snip
 
@@ -1298,6 +1334,17 @@ class PileUpper:
                     self.empty_pup,
                 )
         return outdict
+
+    def _get_bw_values_snip(self, snip):
+        bw1 = self.bw.stats(snip["chrom1"],
+                       int(snip["center1"]-self.flank),
+                       int(snip["center1"]+self.flank),
+                       nBins=self.nbins)
+        bw2 = self.bw.stats(snip["chrom2"],
+                       int(snip["center2"]-self.flank),
+                       int(snip["center2"]+self.flank),
+                       nBins=self.nbins)
+        return bw1, bw2
 
     def pileup_region(
         self,
@@ -1419,6 +1466,26 @@ class PileUpper:
             nproc = self.nproc
         if len(self.chroms) == 0:
             return self.make_outmap(), 0
+        if self.bw:
+            def bw1sum(snip1, snip2):
+                if "bw_1" not in snip1:
+                    snip1["bw_1"] = snip2["bw_1"]
+                else:
+                    snip1["bw_1"] = np.nansum([snip1["bw_1"], snip2["bw_1"]], axis=0)
+                return snip1
+            def bw2sum(snip1, snip2):
+                if "bw_2" not in snip1:
+                    snip1["bw_2"] = snip2["bw_2"]
+                else:
+                    snip1["bw_2"] = np.nansum([snip1["bw_2"], snip2["bw_2"]], axis=0)
+                return snip1
+            if extra_sum_funcs is not None:
+                extra_sum_funcs.update({"bw_1": bw1sum,
+                                        "bw_2": bw2sum})
+            else:
+                extra_sum_funcs = {"bw_1": bw1sum, 
+                                   "bw_2": bw2sum}
+
         sum_func = partial(sum_pups, extra_funcs=extra_sum_funcs)
         # Generate all combinations of chromosomes
         regions1 = []
@@ -1873,6 +1940,7 @@ def pileup(
     rescale_flank=1,
     rescale_size=99,
     store_stripes=False,
+    bw=False,
     nproc=1,
     seed=None,
 ):
@@ -2139,6 +2207,7 @@ def pileup(
         flip_negative_strand=flip_negative_strand,
         ignore_diags=min_diag,
         store_stripes=store_stripes,
+        bw=bw,
         nproc=nproc,
     )
 
